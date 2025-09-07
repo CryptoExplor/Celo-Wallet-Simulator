@@ -1,0 +1,31 @@
+{
+  "name": "celo-wallet-simulator",
+  "version": "1.0.0",
+  "description": "A developer-focused simulator for experimenting with wallet transaction flows on the Celo blockchain. Includes persona-based behavior, logging, and RPC management.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"No tests defined – build OK\" && exit 0",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "celo",
+    "wallet",
+    "simulator",
+    "blockchain",
+    "developer-tools"
+  ],
+  "author": "CryptoExplor",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  },
+  "devDependencies": {
+    "eslint": "^9.9.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
