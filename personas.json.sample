@@ -1,0 +1,17 @@
+{
+  "0x1234567890abcdef1234567890abcdef12345678": {
+    "idleBias": 0.00942793002497938,
+    "pingBias": 0.0842624813072449,
+    "minAmount": 0.00012672600278248618,
+    "maxAmount": 0.018966847269855824,
+    "activeHours": [
+      7,
+      22
+    ],
+    "cooldownAfterFail": 225,
+    "avgWait": 92,
+    "retryBias": 0.18000638170775474,
+    "maxNonce": 598,
+    "failCount": 0,
+    "lastFailAt": null
+  },
