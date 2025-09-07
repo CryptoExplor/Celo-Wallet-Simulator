@@ -1,9 +1,6 @@
 # ⚡ Celo Wallet Simulator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)  
-[![Node.js](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org/)  
-[![CI](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions/workflows/node.yml/badge.svg)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions)  
-[![GitHub stars](https://img.shields.io/github/stars/CryptoExplor/Celo-Wallet-Simulator?style=social)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/stargazers)  
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)    [![Node.js](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org/)     [![CI](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions/workflows/node.yml/badge.svg)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions)     [![GitHub stars](https://img.shields.io/github/stars/CryptoExplor/Celo-Wallet-Simulator?style=social)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/stargazers)  
 
 A lightweight **wallet activity simulator** for the **Celo blockchain**, designed for:
 
