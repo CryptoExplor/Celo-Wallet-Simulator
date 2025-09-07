@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "test": "echo \"No tests defined – build OK\" && exit 0"
+    "lint": "echo \"No linting configured\" && exit 0"
   },
   "keywords": [
     "celo",
