@@ -98,8 +98,8 @@ celo-wallet-simulator/
 │── personas.json     # Wallet behavior profiles
 │── key.txt           # Wallet private keys (1 per line)
 │── logs/             # Transaction logs (CSV)
-│── USAGE.md
-│── ARCHITECTURE.md
+│── USAGE.md          # Usage documentation
+│── ARCHITECTURE.md   # Architecture documentation
 │── package.json
 ```
 
