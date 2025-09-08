@@ -84,6 +84,30 @@ function ensurePersona(wallet) {
   return walletProfiles[wallet.address];
 }
 
+// === NEW: Inactive Wallet Management ===
+const inactiveFile = "inactive.json";
+let inactiveWallets = new Set();
+
+function loadInactive() {
+  if (fs.existsSync(inactiveFile)) {
+    try {
+      inactiveWallets = new Set(JSON.parse(fs.readFileSync(inactiveFile, "utf-8")));
+      console.log(chalk.gray(`📂 Loaded ${inactiveWallets.size} inactive wallets`));
+    } catch (e) {
+      console.error("❌ Failed parsing inactive.json, starting empty");
+      inactiveWallets = new Set();
+    }
+  }
+}
+
+function saveInactive() {
+  try {
+    fs.writeFileSync(inactiveFile, JSON.stringify([...inactiveWallets], null, 2));
+  } catch (e) {
+    console.error("❌ Failed saving inactive.json:", e.message);
+  }
+}
+
 // --- Dynamic Log File Management (Daily Rotation) ---
 // This function returns the log file path for the current day.
 function getLogFile() {
@@ -175,6 +199,25 @@ function randomDelay(minSec, maxSec) {
 function isWithinActiveHours(profile) {
   const nowUTC = new Date().getUTCHours();
   return nowUTC >= profile.activeHours[0] && nowUTC <= profile.activeHours[1];
+}
+
+// === NEW: Active Hours Check ===
+function checkActive(wallet, profile) {
+  if (isWithinActiveHours(profile)) {
+    if (inactiveWallets.has(wallet.address)) {
+      inactiveWallets.delete(wallet.address);
+      saveInactive();
+      console.log(chalk.green(`✅ Wallet ${wallet.address} re-activated`));
+    }
+    return true;
+  } else {
+    if (!inactiveWallets.has(wallet.address)) {
+      inactiveWallets.add(wallet.address);
+      saveInactive();
+      console.log(chalk.gray(`🛌 Wallet ${wallet.address} marked inactive`));
+    }
+    return false;
+  }
 }
 
 async function sendTx(wallet, provider, profile, url) {
@@ -307,8 +350,22 @@ async function safeSendTx(wallet, provider, profile, url) {
   }
 }
 
+// === NEW: Refresh inactive wallets every 30 minutes ===
+setInterval(() => {
+  console.log(chalk.cyan("🔄 Refreshing inactive wallets..."));
+  for (const addr of [...inactiveWallets]) {
+    const profile = walletProfiles[addr];
+    if (profile && isWithinActiveHours(profile)) {
+      inactiveWallets.delete(addr);
+      console.log(chalk.green(`🌅 Wallet ${addr} is now inside active hours`));
+    }
+  }
+  saveInactive();
+}, 30 * 60 * 1000);
+
 async function loop() {
-  loadPersonas(); // Load personas at the start of the loop
+  loadPersonas();
+  loadInactive();
   while (true) {
     // === NEW LOGIC: Retry loop for RPC connection ===
     let provider = null;
@@ -329,11 +386,9 @@ async function loop() {
     const wallet = new ethers.Wallet(key, provider);
     const profile = ensurePersona(wallet);
 
-    // Check if the wallet is within its active hours
-    if (!isWithinActiveHours(profile)) {
-      const sleepSec = 600 + Math.floor(Math.random() * 600); // 10–20 min idle
-      console.log(chalk.gray(`🛌 Wallet ${wallet.address} is outside active hours, sleeping ${sleepSec}s`));
-      await randomDelay(sleepSec, sleepSec);
+    // === NEW: Main loop modification ===
+    if (!checkActive(wallet, profile)) {
+      await randomDelay(10, 15); // just a short pause
       continue;
     }
 
