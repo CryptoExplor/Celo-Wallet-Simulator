@@ -24,6 +24,12 @@ const PRIVATE_KEYS = fs.readFileSync(keysFile, "utf-8")
   .map(line => line.trim())
   .filter(line => line.length > 0);
 
+// Pre-calculate all wallet addresses to easily check if all are inactive
+const ALL_WALLETS = PRIVATE_KEYS.map(key => {
+  const wallet = new ethers.Wallet(key);
+  return wallet.address;
+});
+
 // --- Wallet Persona Management ---
 const personaFile = "personas.json";
 let walletProfiles = {};
@@ -71,7 +77,7 @@ function ensurePersona(wallet) {
       // NEW TRAITS
       activeHours: [6 + Math.floor(Math.random() * 6), 22], // e.g. 06:00-22:00 UTC
       cooldownAfterFail: 60 + Math.floor(Math.random() * 180), // 1-4 min
-      avgWait: 60 + Math.floor(Math.random() * 120), // base wait time 1-3 min
+      avgWait: 60 + Math.floor(Math.random() * 41), // base wait time 1-1.6 min
       retryBias: Math.random() * 0.5, // 0-50% chance to retry
       // dynamic per-wallet nonce retirement
       maxNonce: 520 + Math.floor(Math.random() * 100),
@@ -367,6 +373,12 @@ async function loop() {
   loadPersonas();
   loadInactive();
   while (true) {
+    // === NEW LOGIC: Check if all wallets are inactive and sleep if so ===
+    if (inactiveWallets.size >= ALL_WALLETS.length) {
+      console.log(chalk.yellow("😴 All wallets are currently inactive. Sleeping for 5 minutes..."));
+      await randomDelay(300, 300); // 5 minutes
+    }
+
     // === NEW LOGIC: Retry loop for RPC connection ===
     let provider = null;
     let url = null;
