@@ -1,10 +1,17 @@
-const { ethers } = require("ethers");
-const dotenv = require("dotenv");
-const fs = require("fs");
-const path = require("path");
-const chalk = require("chalk");
+import { ethers } from "ethers";
+import dotenv from "dotenv";
+import * as fs from "fs/promises";
+import path from "path";
+import chalk from "chalk";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+// Define __dirname equivalent for ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // === CONFIG ===
 // List of public RPCs for Celo.
@@ -18,17 +25,60 @@ const GAS_LIMIT = 21000;
 const keysFile = "key.txt";
 let lastKey = null;
 
-// --- Load keys from file ---
-const PRIVATE_KEYS = fs.readFileSync(keysFile, "utf-8")
-  .split("\n")
-  .map(line => line.trim())
-  .filter(line => line.length > 0);
+// --- Key loader (inline, no extra files) ---
+let PRIVATE_KEYS = [];
+let ALL_WALLETS = [];
 
-// Pre-calculate all wallet addresses to easily check if all are inactive
-const ALL_WALLETS = PRIVATE_KEYS.map(key => {
-  const wallet = new ethers.Wallet(key);
-  return wallet.address;
-});
+// normalize to 0x-prefixed hex string
+function normalizeKey(k) {
+  if (!k) return null;
+  k = String(k).trim();
+  if (!k) return null;
+  return k.startsWith("0x") ? k : "0x" + k;
+}
+
+// Validate by constructing an ethers.Wallet
+function isValidPrivateKey(k) {
+  try {
+    new ethers.Wallet(k);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Load keys: primary from env PRIVATE_KEYS (comma separated), fallback to keysFile (one-per-line)
+async function loadKeysInline({ allowFileFallback = true } = {}) {
+  // 1) env var (preferred)
+  const env = process.env.PRIVATE_KEYS;
+  if (env && env.trim().length > 0) {
+    PRIVATE_KEYS = env.split(",").map(normalizeKey).filter(Boolean);
+  } else if (allowFileFallback) {
+    // 2) fallback to keysFile (async fs from fs/promises is used in this file)
+    try {
+      const raw = await fs.readFile(keysFile, "utf-8");
+      PRIVATE_KEYS = raw.split(/\r?\n/).map(normalizeKey).filter(Boolean);
+    } catch (err) {
+      // leave PRIVATE_KEYS empty if file not found / unreadable
+      PRIVATE_KEYS = [];
+    }
+  }
+
+  // validate & compute addresses
+  const valid = [];
+  const addrs = [];
+  for (const k of PRIVATE_KEYS) {
+    if (!k) continue;
+    if (!isValidPrivateKey(k)) {
+      console.warn("Ignored invalid private key:", k);
+      continue;
+    }
+    valid.push(k);
+    addrs.push(new ethers.Wallet(k).address);
+  }
+  PRIVATE_KEYS = valid;
+  ALL_WALLETS = addrs;
+}
 
 // --- Wallet Persona Management ---
 const personaFile = "personas.json";
@@ -36,31 +86,33 @@ let walletProfiles = {};
 let lastPersonaSave = 0;
 const PERSONA_SAVE_DEBOUNCE_MS = 5_000; // coalesce multiple writes into one
 
-function loadPersonas() {
-  if (fs.existsSync(personaFile)) {
-    try {
-      walletProfiles = JSON.parse(fs.readFileSync(personaFile, "utf-8"));
-      console.log(chalk.cyan("🎭 Loaded existing personas"));
-    } catch (e) {
+async function loadPersonas() {
+  try {
+    const data = await fs.readFile(personaFile, "utf-8");
+    walletProfiles = JSON.parse(data);
+    console.log(chalk.cyan("🎭 Loaded existing personas"));
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.log(chalk.yellow("🎭 Personas file not found, starting fresh."));
+    } else {
       console.error(chalk.bgRed.white.bold("❌ Error parsing personas.json, starting fresh."));
-      walletProfiles = {};
     }
+    walletProfiles = {};
   }
 }
 
 // Debounced save to avoid frequent blocking disk writes
-function savePersonas() {
+async function savePersonas() {
   try {
     const now = Date.now();
     if (now - lastPersonaSave < PERSONA_SAVE_DEBOUNCE_MS) {
-      // schedule a final write shortly
       setTimeout(() => {
-        try { fs.writeFileSync(personaFile, JSON.stringify(walletProfiles, null, 2)); lastPersonaSave = Date.now(); }
+        try { fs.writeFile(personaFile, JSON.stringify(walletProfiles, null, 2)); lastPersonaSave = Date.now(); }
         catch (e) { console.error("failed saving personas:", e.message); }
       }, PERSONA_SAVE_DEBOUNCE_MS);
       return;
     }
-    fs.writeFileSync(personaFile, JSON.stringify(walletProfiles, null, 2));
+    await fs.writeFile(personaFile, JSON.stringify(walletProfiles, null, 2));
     lastPersonaSave = now;
   } catch (e) {
     console.error("failed saving personas:", e.message);
@@ -74,13 +126,12 @@ function ensurePersona(wallet) {
       pingBias: Math.random() * 0.25,
       minAmount: 0.00005 + Math.random() * 0.0001,
       maxAmount: 0.015 + Math.random() * 0.005,
-      // NEW TRAITS
-      activeHours: [6 + Math.floor(Math.random() * 6), 22], // e.g. 06:00-22:00 UTC
-      cooldownAfterFail: 60 + Math.floor(Math.random() * 180), // 1-4 min
-      avgWait: 60 + Math.floor(Math.random() * 41), // base wait time 1-1.6 min
+      activeHours: [2 + Math.floor(Math.random() * 4), 22 + Math.floor(Math.random() * 3)], // 2-5 to 22-24 UTC
+      cooldownAfterFail: 60 + Math.floor(Math.random() * 120), // 1-3 min
+      avgWait: 30 + Math.floor(Math.random() * 40), // base wait time 30-70 sec
       retryBias: Math.random() * 0.5, // 0-50% chance to retry
       // dynamic per-wallet nonce retirement
-      maxNonce: 520 + Math.floor(Math.random() * 100),
+      maxNonce: 520 + Math.floor(Math.random() * 80),
       // failure tracking
       failCount: 0,
       lastFailAt: null
@@ -94,21 +145,24 @@ function ensurePersona(wallet) {
 const inactiveFile = "inactive.json";
 let inactiveWallets = new Set();
 
-function loadInactive() {
-  if (fs.existsSync(inactiveFile)) {
-    try {
-      inactiveWallets = new Set(JSON.parse(fs.readFileSync(inactiveFile, "utf-8")));
-      console.log(chalk.gray(`📂 Loaded ${inactiveWallets.size} inactive wallets`));
-    } catch (e) {
+async function loadInactive() {
+  try {
+    const data = await fs.readFile(inactiveFile, "utf-8");
+    inactiveWallets = new Set(JSON.parse(data));
+    console.log(chalk.gray(`📂 Loaded ${inactiveWallets.size} inactive wallets`));
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.log(chalk.yellow("📂 Inactive file not found, starting empty."));
+    } else {
       console.error("❌ Failed parsing inactive.json, starting empty");
-      inactiveWallets = new Set();
     }
+    inactiveWallets = new Set();
   }
 }
 
-function saveInactive() {
+async function saveInactive() {
   try {
-    fs.writeFileSync(inactiveFile, JSON.stringify([...inactiveWallets], null, 2));
+    await fs.writeFile(inactiveFile, JSON.stringify([...inactiveWallets], null, 2));
   } catch (e) {
     console.error("❌ Failed saving inactive.json:", e.message);
   }
@@ -121,11 +175,13 @@ function getLogFile() {
   return path.join(__dirname, `tx_log_${today}.csv`);
 }
 
-// This function initializes the log file with a header if it doesn't exist.
-function initLogFile() {
+async function initLogFile() {
   const logFile = getLogFile();
-  if (!fs.existsSync(logFile)) {
-    fs.writeFileSync(
+  try {
+    await fs.access(logFile);
+  } catch (e) {
+    // File doesn't exist, create it with a header
+    await fs.writeFile(
       logFile,
       "timestamp,wallet,tx_hash,nonce,gas_used,gas_price_gwei,fee_celo,status,action\n"
     );
@@ -139,10 +195,10 @@ const FLUSH_INTERVAL = 300 * 1000;
 function bufferTxLog(entry) {
   txBuffer.push(entry);
 }
-function flushTxLog() {
+async function flushTxLog() {
   if (txBuffer.length === 0) return;
-  const logFile = initLogFile();
-  fs.appendFileSync(logFile, txBuffer.join("\n") + "\n");
+  const logFile = await initLogFile();
+  await fs.appendFile(logFile, txBuffer.join("\n") + "\n");
   console.log(chalk.gray(`📝 Flushed ${txBuffer.length} tx logs to disk`));
   txBuffer = [];
 }
@@ -158,13 +214,46 @@ function pickRandomKey() {
   return lastKey;
 }
 
-// --- Provider without proxy ---
-function getProvider(rpcUrl) {
+// --- Proxy Variables ---
+let proxies = [];
+
+// --- Proxy Functions ---
+async function loadProxies() {
+  try {
+    const fileContent = await fs.readFile("proxy.txt", "utf8");
+    proxies = fileContent.split("\n").map(proxy => proxy.trim()).filter(proxy => proxy);
+    if (proxies.length === 0) {
+      console.log(chalk.cyan(`[${new Date().toISOString()}] ⟐ No proxy found in proxy.txt. Running without proxy.`));
+    } else {
+      console.log(chalk.green(`[${new Date().toISOString()}] ✔ Loaded ${proxies.length} proxies from proxy.txt`));
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.log(chalk.cyan(`[${new Date().toISOString()}] ⟐ No proxy.txt found, running without proxy.`));
+    } else {
+      console.log(chalk.red(`[${new Date().toISOString()}] ✖ Failed to load proxy: ${error.message}`));
+    }
+    proxies = [];
+  }
+}
+
+function createAgent(proxyUrl) {
+  if (!proxyUrl) return null;
+  if (proxyUrl.startsWith("socks")) {
+    return new SocksProxyAgent(proxyUrl);
+  } else {
+    return new HttpsProxyAgent(proxyUrl);
+  }
+}
+
+// --- Provider with proxy support ---
+function getProvider(rpcUrl, agent) {
   const network = {
     chainId: 42220,
     name: "celo"
   };
-  return new ethers.JsonRpcProvider(rpcUrl, network);
+  const providerOptions = agent ? { fetchOptions: { agent } } : {};
+  return new ethers.JsonRpcProvider(rpcUrl, network, providerOptions);
 }
 
 /**
@@ -175,7 +264,10 @@ async function tryProviders() {
   console.log(chalk.hex("#00FFFF").bold("🔍 Searching for a working RPC endpoint..."));
   for (const url of RPCS) {
     try {
-      const provider = getProvider(url);
+      const proxyUrl = proxies.length > 0 ? proxies[Math.floor(Math.random() * proxies.length)] : null;
+      const agent = createAgent(proxyUrl);
+
+      const provider = getProvider(url, agent);
       const network = await Promise.race([
         provider.getNetwork(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
@@ -357,7 +449,7 @@ async function safeSendTx(wallet, provider, profile, url) {
 }
 
 // === NEW: Refresh inactive wallets every 30 minutes ===
-setInterval(() => {
+setInterval(async () => {
   console.log(chalk.cyan("🔄 Refreshing inactive wallets..."));
   for (const addr of [...inactiveWallets]) {
     const profile = walletProfiles[addr];
@@ -366,17 +458,32 @@ setInterval(() => {
       console.log(chalk.green(`🌅 Wallet ${addr} is now inside active hours`));
     }
   }
-  saveInactive();
+  await saveInactive();
 }, 30 * 60 * 1000);
 
-async function loop() {
-  loadPersonas();
-  loadInactive();
+async function main() {
+  // Load keys (env primary, file fallback)
+  await loadKeysInline({ allowFileFallback: true });
+
+  if (PRIVATE_KEYS.length === 0) {
+    console.error(chalk.bgRed.white.bold(`❌ No valid private keys found (env or ${keysFile}). Make sure PRIVATE_KEYS env var or ${keysFile} exists and contains keys.`));
+    process.exit(1);
+  }
+
+
+  await loadPersonas();
+  await loadInactive();
+  await loadProxies();
+
+  // === NEW LOGIC: Initial log file creation before the loop starts ===
+  await initLogFile();
+
   while (true) {
     // === NEW LOGIC: Check if all wallets are inactive and sleep if so ===
     if (inactiveWallets.size >= ALL_WALLETS.length) {
       console.log(chalk.yellow("😴 All wallets are currently inactive. Sleeping for 5 minutes..."));
-      await randomDelay(300, 300); // 5 minutes
+      await randomDelay(240, 360); // 5 minutes
+      continue;
     }
 
     // === NEW LOGIC: Retry loop for RPC connection ===
@@ -400,7 +507,7 @@ async function loop() {
 
     // === NEW: Main loop modification ===
     if (!checkActive(wallet, profile)) {
-      await randomDelay(10, 15); // just a short pause
+      await randomDelay(10, 15);
       continue;
     }
 
@@ -415,10 +522,29 @@ async function loop() {
   }
 }
 
-loop();
+main();
 
 // ensure flush/persona save on termination/unhandled
-process.on("SIGINT", () => { console.log("SIGINT"); flushTxLog(); savePersonas(); process.exit(); });
-process.on("SIGTERM", () => { console.log("SIGTERM"); flushTxLog(); savePersonas(); process.exit(); });
-process.on("exit", () => { flushTxLog(); savePersonas(); });
-process.on("unhandledRejection", (r) => { console.error("unhandledRejection:", r); flushTxLog(); savePersonas(); });
+process.on("SIGINT", async () => {
+  console.log("SIGINT received, shutting down gracefully...");
+  await flushTxLog();
+  await savePersonas();
+  process.exit();
+});
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received, shutting down gracefully...");
+  await flushTxLog();
+  await savePersonas();
+  process.exit();
+});
+process.on("exit", async () => {
+  console.log("Exiting, flushing final logs...");
+  await flushTxLog();
+  await savePersonas();
+});
+process.on("unhandledRejection", async (r) => {
+  console.error("unhandledRejection:", r);
+  await flushTxLog();
+  await savePersonas();
+  process.exit(1);
+});
