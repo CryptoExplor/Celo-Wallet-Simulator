@@ -96,7 +96,6 @@ function decryptWithAnyKey(encrypted) {
 // === CONFIG ===
 // List of public RPCs for Celo.
 const RPCS = [
-  "https://celo-mainnet.infura.io/v3/f0c6b3797dd54dc2aa91cd4a463bcc57",
   "https://rpc.ankr.com/celo",
   "https://celo.drpc.org",
   "https://forno.celo.org",
@@ -153,6 +152,25 @@ async function loadKeysInline() {
   console.log(chalk.cyan(`🔐 Loaded ${ALL_WALLETS.length} wallets (encrypted in memory)`));
 }
 
+// === NEW: Device Agent Generation ===
+function generateDeviceAgent() {
+  const browsers = ["Chrome", "Firefox", "Edge", "Safari"];
+  const os = ["Windows NT 10.0", "Macintosh; Intel Mac OS X 13_0", "Linux x86_64"];
+
+  const browser = browsers[Math.floor(Math.random() * browsers.length)];
+  const system = os[Math.floor(Math.random() * os.length)];
+  const version = `${Math.floor(Math.random() * 100)}.0.${Math.floor(Math.random() * 1000)}`;
+
+  // Simulated network latency per wallet (in ms)
+  const latency = 50 + Math.floor(Math.random() * 200); // 50ms to 250ms
+
+  return {
+    userAgent: `${browser}/${version} (${system})`,
+    latency
+  };
+}
+
+
 // --- Wallet Persona Management ---
 const personaFile = "personas.json";
 let walletProfiles = {};
@@ -194,6 +212,7 @@ async function savePersonas() {
 
 function ensurePersona(wallet) {
   if (!walletProfiles[wallet.address]) {
+    const deviceAgent = generateDeviceAgent();
     walletProfiles[wallet.address] = {
       idleBias: Math.random() * 0.25,
       pingBias: Math.random() * 0.25,
@@ -207,7 +226,8 @@ function ensurePersona(wallet) {
       maxNonce: 520 + Math.floor(Math.random() * 80),
       // failure tracking
       failCount: 0,
-      lastFailAt: null
+      lastFailAt: null,
+      deviceAgent // store User-Agent + latency
     };
     savePersonas();
   }
@@ -333,7 +353,7 @@ function getProvider(rpcUrl, agent) {
  * Attempts to connect to an RPC endpoint.
  * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string}|null>} The working provider and its URL, or null if all fail.
  */
-async function tryProviders() {
+async function tryProviders(profile) {
   console.log(chalk.hex("#00FFFF").bold("🔍 Searching for a working RPC endpoint..."));
   for (const url of RPCS) {
     try {
@@ -358,8 +378,8 @@ async function tryProviders() {
  * Iterates through the list of RPCs and returns the first one that successfully connects.
  * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string}>} The working provider and its URL.
  */
-async function getWorkingProvider() {
-  return await tryProviders();
+async function getWorkingProvider(profile) {
+  return await tryProviders(profile);
 }
 
 function randomDelay(minSec, maxSec) {
@@ -397,6 +417,10 @@ async function sendTx(wallet, provider, profile, url) {
       console.log(chalk.hex("#808080").italic("\n😴 Persona idle mode, skipping this cycle..."));
       return;
     }
+
+    // === NEW: Simulate Network Latency ===
+    console.log(chalk.hex("#FFA500").bold(`🌐 Simulating network latency: ${profile.deviceAgent.latency}ms...`));
+    await new Promise(res => setTimeout(res, profile.deviceAgent.latency));
 
     const balance = await provider.getBalance(wallet.address);
     await randomDelay(2, 4);
@@ -546,6 +570,11 @@ async function main() {
   await initLogFile();
 
   while (true) {
+    // Pick a wallet and its persona
+    let key = pickRandomKey();
+    let wallet = new ethers.Wallet(key);
+    const profile = ensurePersona(wallet);
+
     // === NEW LOGIC: Check if all wallets are inactive and sleep if so ===
     if (inactiveWallets.size >= ALL_WALLETS.length) {
       console.log(chalk.yellow("😴 All wallets are currently inactive. Sleeping for 5 minutes..."));
@@ -557,7 +586,7 @@ async function main() {
     let provider = null;
     let url = null;
     while (!provider) {
-      const providerResult = await getWorkingProvider();
+      const providerResult = await getWorkingProvider(profile);
       if (providerResult) {
         provider = providerResult.provider;
         url = providerResult.url;
@@ -568,10 +597,8 @@ async function main() {
     }
     // === END NEW LOGIC ===
 
-    // Get the decrypted private key and create a new wallet instance for the transaction
-    let key = pickRandomKey();
-    let wallet = new ethers.Wallet(key, provider);
-    const profile = ensurePersona(wallet);
+    // Re-attach wallet to the working provider
+    wallet = new ethers.Wallet(key, provider);
 
     // === NEW: Main loop modification ===
     if (!checkActive(wallet, profile)) {
