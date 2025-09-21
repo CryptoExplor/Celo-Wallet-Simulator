@@ -6,12 +6,55 @@ import chalk from "chalk";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 
 dotenv.config();
 
 // Define __dirname equivalent for ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// === NEW: In-Memory Encryption Helper Functions ===
+const ALGO = "aes-256-gcm";
+const IV_LENGTH = 12;
+
+/**
+ * Encrypts a private key using a master key.
+ * @param {string} privateKey - The private key to encrypt.
+ * @param {string} masterKey - The master key for encryption.
+ * @returns {string} The encrypted key string in the format "iv:authTag:encrypted".
+ */
+function encryptPrivateKey(privateKey, masterKey) {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const derivedKey = crypto.scryptSync(masterKey, 'salt', 32);
+  const cipher = crypto.createCipheriv(ALGO, derivedKey, iv);
+
+  let encrypted = cipher.update(privateKey, "utf8", "hex");
+  encrypted += cipher.final("hex");
+
+  const authTag = cipher.getAuthTag().toString("hex");
+  return `${iv.toString("hex")}:${authTag}:${encrypted}`;
+}
+
+/**
+ * Decrypts an encrypted private key.
+ * @param {string} encrypted - The encrypted key string.
+ * @param {string} masterKey - The master key for decryption.
+ * @returns {string} The decrypted private key.
+ */
+function decryptPrivateKey(encrypted, masterKey) {
+  const [ivHex, authTagHex, data] = encrypted.split(":");
+  const iv = Buffer.from(ivHex, "hex");
+  const authTag = Buffer.from(authTagHex, "hex");
+  const derivedKey = crypto.scryptSync(masterKey, 'salt', 32);
+  const decipher = crypto.createDecipheriv(ALGO, derivedKey, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(data, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+
+  return decrypted;
+}
 
 // === CONFIG ===
 // List of public RPCs for Celo.
@@ -26,8 +69,16 @@ const keysFile = "key.txt";
 let lastKey = null;
 
 // --- Key loader (env only, one key per line inside PRIVATE_KEYS) ---
-let PRIVATE_KEYS = [];
+// Now stores encrypted keys
+let ENCRYPTED_KEYS = [];
 let ALL_WALLETS = [];
+
+// === NEW: Master Key from Environment ===
+const MASTER_KEY = process.env.MASTER_KEY;
+if (!MASTER_KEY) {
+  console.error(chalk.bgRed.white.bold("❌ MASTER_KEY environment variable is not set!"));
+  process.exit(1);
+}
 
 // normalize to 0x-prefixed hex string
 function normalizeKey(k) {
@@ -56,14 +107,19 @@ async function loadKeysInline() {
     .map(normalizeKey)
     .filter(Boolean);
 
-  PRIVATE_KEYS = keys.filter(isValidPrivateKey);
+  const validKeys = keys.filter(isValidPrivateKey);
 
-  if (PRIVATE_KEYS.length === 0) {
+  if (validKeys.length === 0) {
     console.error(chalk.bgRed.white.bold("❌ No valid private keys found in PRIVATE_KEYS (env). Each key should be on its own line."));
     process.exit(1);
   }
 
-  ALL_WALLETS = PRIVATE_KEYS.map(k => new ethers.Wallet(k).address);
+  // Encrypt keys and store them
+  ENCRYPTED_KEYS = validKeys.map(k => encryptPrivateKey(k, MASTER_KEY));
+  // Create ALL_WALLETS list using decrypted keys just once at startup
+  ALL_WALLETS = validKeys.map(k => new ethers.Wallet(k).address);
+
+  console.log(chalk.cyan(`🔐 Loaded ${ALL_WALLETS.length} wallets (encrypted in memory)`));
 }
 
 // --- Wallet Persona Management ---
@@ -192,12 +248,12 @@ async function flushTxLog() {
 setInterval(flushTxLog, FLUSH_INTERVAL);
 
 // --- Pick random key (with small chance of reusing last key) ---
-// Provides a more "human-like" key selection by sometimes re-using the last key.
+// Now decrypts the key before use
 function pickRandomKey() {
-  if (lastKey && Math.random() < 0.2) return lastKey;
-  const idx = Math.floor(Math.random() * PRIVATE_KEYS.length);
-  lastKey = PRIVATE_KEYS[idx];
-  return lastKey;
+  const idx = Math.floor(Math.random() * ENCRYPTED_KEYS.length);
+  const encrypted = ENCRYPTED_KEYS[idx];
+  const privateKey = decryptPrivateKey(encrypted, MASTER_KEY);
+  return privateKey;
 }
 
 // --- Proxy Variables ---
@@ -217,7 +273,7 @@ async function loadProxies() {
     if (error.code === 'ENOENT') {
       console.log(chalk.cyan(`[${new Date().toISOString()}] ⟐ No proxy.txt found, running without proxy.`));
     } else {
-      console.log(chalk.red(`[${new Date().toISOString()}] ✖ Failed to load proxy: ${error.message}`));
+      console.error(chalk.red(`[${new Date().toISOString()}] ✖ Failed to load proxy: ${error.message}`));
     }
     proxies = [];
   }
@@ -451,7 +507,6 @@ async function main() {
   // Load keys (env primary, file fallback)
   await loadKeysInline();
 
-
   await loadPersonas();
   await loadInactive();
   await loadProxies();
@@ -482,6 +537,7 @@ async function main() {
     }
     // === END NEW LOGIC ===
 
+    // Get the decrypted private key and create a new wallet instance for the transaction
     const key = pickRandomKey();
     const wallet = new ethers.Wallet(key, provider);
     const profile = ensurePersona(wallet);
