@@ -25,7 +25,7 @@ const GAS_LIMIT = 21000;
 const keysFile = "key.txt";
 let lastKey = null;
 
-// --- Key loader (inline, no extra files) ---
+// --- Key loader (env only, one key per line inside PRIVATE_KEYS) ---
 let PRIVATE_KEYS = [];
 let ALL_WALLETS = [];
 
@@ -47,37 +47,23 @@ function isValidPrivateKey(k) {
   }
 }
 
-// Load keys: primary from env PRIVATE_KEYS (comma separated), fallback to keysFile (one-per-line)
-async function loadKeysInline({ allowFileFallback = true } = {}) {
-  // 1) env var (preferred)
-  const env = process.env.PRIVATE_KEYS;
-  if (env && env.trim().length > 0) {
-    PRIVATE_KEYS = env.split(",").map(normalizeKey).filter(Boolean);
-  } else if (allowFileFallback) {
-    // 2) fallback to keysFile (async fs from fs/promises is used in this file)
-    try {
-      const raw = await fs.readFile(keysFile, "utf-8");
-      PRIVATE_KEYS = raw.split(/\r?\n/).map(normalizeKey).filter(Boolean);
-    } catch (err) {
-      // leave PRIVATE_KEYS empty if file not found / unreadable
-      PRIVATE_KEYS = [];
-    }
+async function loadKeysInline() {
+  const envKeys = process.env.PRIVATE_KEYS || "";
+  
+  // split by newlines, trim, filter empties
+  const keys = envKeys
+    .split(/\r?\n/) 
+    .map(normalizeKey)
+    .filter(Boolean);
+
+  PRIVATE_KEYS = keys.filter(isValidPrivateKey);
+
+  if (PRIVATE_KEYS.length === 0) {
+    console.error(chalk.bgRed.white.bold("❌ No valid private keys found in PRIVATE_KEYS (env). Each key should be on its own line."));
+    process.exit(1);
   }
 
-  // validate & compute addresses
-  const valid = [];
-  const addrs = [];
-  for (const k of PRIVATE_KEYS) {
-    if (!k) continue;
-    if (!isValidPrivateKey(k)) {
-      console.warn("Ignored invalid private key:", k);
-      continue;
-    }
-    valid.push(k);
-    addrs.push(new ethers.Wallet(k).address);
-  }
-  PRIVATE_KEYS = valid;
-  ALL_WALLETS = addrs;
+  ALL_WALLETS = PRIVATE_KEYS.map(k => new ethers.Wallet(k).address);
 }
 
 // --- Wallet Persona Management ---
@@ -463,12 +449,7 @@ setInterval(async () => {
 
 async function main() {
   // Load keys (env primary, file fallback)
-  await loadKeysInline({ allowFileFallback: true });
-
-  if (PRIVATE_KEYS.length === 0) {
-    console.error(chalk.bgRed.white.bold(`❌ No valid private keys found (env or ${keysFile}). Make sure PRIVATE_KEYS env var or ${keysFile} exists and contains keys.`));
-    process.exit(1);
-  }
+  await loadKeysInline();
 
 
   await loadPersonas();
