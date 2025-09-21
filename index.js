@@ -18,6 +18,26 @@ const __dirname = path.dirname(__filename);
 const ALGO = "aes-256-gcm";
 const IV_LENGTH = 12;
 
+// --- Master Keys ---
+const MASTER_KEY = process.env.MASTER_KEY;
+const BACKUP_KEYS = (process.env.BACKUP_KEYS || "")
+  .split(",")
+  .map(k => k.trim())
+  .filter(Boolean);
+
+if (!MASTER_KEY) {
+  console.error(chalk.bgRed.white.bold("❌ MASTER_KEY environment variable is not set!"));
+  process.exit(1);
+}
+
+const ALL_MASTER_KEYS = [MASTER_KEY, ...BACKUP_KEYS];
+
+// --- Session Salt for Stronger Key Derivation ---
+const sessionSalt = crypto.randomBytes(16);
+function deriveKey(masterKey) {
+  return crypto.scryptSync(masterKey, sessionSalt, 32);
+}
+
 /**
  * Encrypts a private key using a master key.
  * @param {string} privateKey - The private key to encrypt.
@@ -26,7 +46,7 @@ const IV_LENGTH = 12;
  */
 function encryptPrivateKey(privateKey, masterKey) {
   const iv = crypto.randomBytes(IV_LENGTH);
-  const derivedKey = crypto.scryptSync(masterKey, 'salt', 32);
+  const derivedKey = deriveKey(masterKey);
   const cipher = crypto.createCipheriv(ALGO, derivedKey, iv);
 
   let encrypted = cipher.update(privateKey, "utf8", "hex");
@@ -46,7 +66,7 @@ function decryptPrivateKey(encrypted, masterKey) {
   const [ivHex, authTagHex, data] = encrypted.split(":");
   const iv = Buffer.from(ivHex, "hex");
   const authTag = Buffer.from(authTagHex, "hex");
-  const derivedKey = crypto.scryptSync(masterKey, 'salt', 32);
+  const derivedKey = deriveKey(masterKey);
   const decipher = crypto.createDecipheriv(ALGO, derivedKey, iv);
   decipher.setAuthTag(authTag);
 
@@ -56,9 +76,27 @@ function decryptPrivateKey(encrypted, masterKey) {
   return decrypted;
 }
 
+/**
+ * Attempts to decrypt an encrypted key with any of the available master keys.
+ * @param {string} encrypted - The encrypted key string.
+ * @returns {string} The decrypted private key.
+ * @throws {Error} If decryption fails with all keys.
+ */
+function decryptWithAnyKey(encrypted) {
+  for (const key of ALL_MASTER_KEYS) {
+    try {
+      return decryptPrivateKey(encrypted, key);
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("❌ Failed to decrypt private key with all available master keys");
+}
+
 // === CONFIG ===
 // List of public RPCs for Celo.
 const RPCS = [
+  "https://celo-mainnet.infura.io/v3/f0c6b3797dd54dc2aa91cd4a463bcc57",
   "https://rpc.ankr.com/celo",
   "https://celo.drpc.org",
   "https://forno.celo.org",
@@ -72,13 +110,6 @@ let lastKey = null;
 // Now stores encrypted keys
 let ENCRYPTED_KEYS = [];
 let ALL_WALLETS = [];
-
-// === NEW: Master Key from Environment ===
-const MASTER_KEY = process.env.MASTER_KEY;
-if (!MASTER_KEY) {
-  console.error(chalk.bgRed.white.bold("❌ MASTER_KEY environment variable is not set!"));
-  process.exit(1);
-}
 
 // normalize to 0x-prefixed hex string
 function normalizeKey(k) {
@@ -252,7 +283,7 @@ setInterval(flushTxLog, FLUSH_INTERVAL);
 function pickRandomKey() {
   const idx = Math.floor(Math.random() * ENCRYPTED_KEYS.length);
   const encrypted = ENCRYPTED_KEYS[idx];
-  const privateKey = decryptPrivateKey(encrypted, MASTER_KEY);
+  const privateKey = decryptWithAnyKey(encrypted);
   return privateKey;
 }
 
@@ -538,8 +569,8 @@ async function main() {
     // === END NEW LOGIC ===
 
     // Get the decrypted private key and create a new wallet instance for the transaction
-    const key = pickRandomKey();
-    const wallet = new ethers.Wallet(key, provider);
+    let key = pickRandomKey();
+    let wallet = new ethers.Wallet(key, provider);
     const profile = ensurePersona(wallet);
 
     // === NEW: Main loop modification ===
@@ -550,6 +581,10 @@ async function main() {
 
     // Execute the transaction logic, including retries
     await safeSendTx(wallet, provider, profile, url);
+
+    // Explicit memory wipe after use
+    key = null;
+    wallet = null;
 
     // NEW LOGIC: Use persona's avgWait for the wait loop
     let waitSec = Math.floor(profile.avgWait * (0.8 + Math.random() * 0.4));
