@@ -1,7 +1,10 @@
 
 # ⚡ Celo Wallet Simulator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Node.js](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org/) [![CI](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions/workflows/node.yml/badge.svg)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions) [![GitHub stars](https://img.shields.io/github/stars/CryptoExplor/Celo-Wallet-Simulator?style=social)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org/)
+[![CI](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions/workflows/node.yml/badge.svg)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/actions)
+[![GitHub stars](https://img.shields.io/github/stars/CryptoExplor/Celo-Wallet-Simulator?style=social)](https://github.com/CryptoExplor/Celo-Wallet-Simulator/stargazers)
 
 A lightweight **wallet activity simulator** for the **Celo blockchain**, designed for:
 
@@ -14,15 +17,20 @@ A lightweight **wallet activity simulator** for the **Celo blockchain**, designe
 
 ## 📦 Features
 
-* ✅ **In-memory encrypted private keys** (AES-256-GCM): Private keys are kept encrypted in memory and decrypted only when required for signing.
+* ✅ **In-memory encrypted private keys** (AES-256-GCM): Private keys are encrypted in memory and decrypted only when signing transactions.
 * ✅ **Multi-master key support & rotation**: `MASTER_KEY` with optional `BACKUP_KEYS` for recovery and key rotation.
-* ✅ **Persona-driven wallet behavior** (`personas.json`): Configurable parameters include `idleBias`, `pingBias`, `activeHours`, `avgWait`, `retryBias`, `maxNonce`, and `device-agent`.
-* ✅ **Device-agent support**: Per-wallet `User-Agent` and simulated latency to diversify fingerprints.
+* ✅ **Persona-driven wallet behavior** (`personas.json`): Configurable parameters include `idleBias`, `pingBias`, `activeHours`, `avgWait`, `retryBias`, `minAmount`, `maxAmount`, `cooldownAfterFail`, `maxNonce`, and `device-agent`.
+* ✅ **Device-agent support**: Per-wallet `User-Agent` and simulated latency for fingerprint diversity.
 * ✅ **Configurable wait logic**: Adaptive/random spacing to mimic organic activity.
 * ✅ **Multi-RPC rotation & proxy support**: Automatic failover across Celo RPC endpoints; supports HTTP(S) and SOCKS proxies (`proxy.txt`).
-* ✅ **Adaptive activity patterns**: Dynamic `idleBias` based on recent success/failure history.
+* ✅ **Proxy auto-refresh**: Proxies reload every **15 minutes** without restart.
+* ✅ **Inactive wallet refresh**: Wallets marked inactive are refreshed every **30 minutes** and re-activated once their active hours are reached.
+* ✅ **Adaptive activity patterns**: Dynamic `idleBias` adjusting to success/failure rates.
+* ✅ **Transaction retry logic**: Governed by persona `retryBias` and cooldown parameters, with randomized wait times.
 * ✅ **Structured CSV logging**: Daily rotated `tx_log_YYYY-MM-DD.csv` with buffered flushes.
-* ✅ **Graceful shutdown**: Signal handlers flush logs and persist personas.
+* ✅ **Log retention & cleanup**: Old logs (older than 3 days) auto-deleted. Supports `--clear-logs` flag for full cleanup.
+* ✅ **Resource & error monitoring**: Logs memory usage periodically; robust uncaught error handling.
+* ✅ **Graceful shutdown**: Signal handlers flush logs and persist persona state on exit.
 
 ---
 
@@ -38,7 +46,7 @@ A lightweight **wallet activity simulator** for the **Celo blockchain**, designe
 
 2. **Configure environment**
 
-   Create a local `.env` (for testing only — do NOT commit) with at minimum:
+   Create `.env` (for testing only — do NOT commit):
 
    ```bash
    PRIVATE_KEYS="0xabc...\n0xdef..."       # one key per line
@@ -46,11 +54,11 @@ A lightweight **wallet activity simulator** for the **Celo blockchain**, designe
    BACKUP_KEYS="oldMaster1,oldMaster2"     # optional
    ```
 
-   Or set these as OS-level environment variables (recommended for production).
+   Or set them as OS-level environment variables (recommended for production).
 
 3. **(Optional) Add legacy key file**
 
-   If you prefer legacy workflow, create `key.txt` with one private key per line — but `index.js` reads `PRIVATE_KEYS` env by default.
+   Create `key.txt` with one private key per line (optional — overridden by `PRIVATE_KEYS`).
 
 4. **Run the simulator**
 
@@ -60,73 +68,98 @@ A lightweight **wallet activity simulator** for the **Celo blockchain**, designe
 
 5. **Stop gracefully**
 
-   Press `Ctrl+C` — the process will flush logs and save persona state before exit.
+   Press `Ctrl+C` — logs will flush, and persona state will persist.
 
 ---
 
 ## 🧩 Configuration & Files
 
-* `index.js`: Main runtime engine (encryption, personas, RPC/proxy logic, tx loop).
-* `personas.json`: Persona defaults (created automatically if missing). The simulator also supports encrypted persona storage.
-* `inactive.json`: Stores addresses marked outside their active hours (can be encrypted on disk if enabled).
-* `proxy.txt`: Optional: One proxy URL per line (`http(s)://host:port` or `socks5://host:port`).
-* `key.txt`: Legacy: One private key per line (not required if using `PRIVATE_KEYS` env).
-* `tx_log_YYYY-MM-DD.csv`: Daily CSV logs with header: `timestamp,wallet,tx_hash,nonce,gas_used,gas_price_gwei,fee_celo,status,action`.
+* `index.js` — main runtime engine (encryption, personas, RPC/proxy logic, tx loop).
+* `personas.json` — persona defaults (auto-created if missing); supports encrypted storage.
+* `inactive.json` — stores addresses outside active hours (optional encryption).
+* `proxy.txt` — optional: one proxy URL per line (`http(s)://host:port` or `socks5://host:port`).
+* `key.txt` — legacy: one private key per line (optional).
+* `tx_log_YYYY-MM-DD.csv` — daily logs with: `timestamp,wallet,tx_hash,nonce,gas_used,gas_price_gwei,fee_celo,status,action`.
+
+---
+
+### Persona Example
+
+```json
+{
+  "0xabc...": {
+    "idleBias": 0.12,
+    "pingBias": 0.06,
+    "minAmount": 0.0001,
+    "maxAmount": 0.01,
+    "activeHours": [2, 22],
+    "cooldownAfterFail": 90,
+    "avgWait": 45,
+    "retryBias": 0.2,
+    "maxNonce": 560,
+    "failCount": 0,
+    "lastFailAt": null,
+    "deviceAgent": {
+      "userAgent": "Chrome/102.0 (Windows NT 10.0)",
+      "latency": 120
+    }
+  }
+}
+```
 
 ---
 
 ## 🔒 Security Notes
 
-* **MASTER_KEY** encrypts private keys in memory and is required at process start. Provide it via OS-level secrets or a secure vault in production.
-* **BACKUP_KEYS** allow decrypting older encrypted blobs after key rotation. The script attempts decryption with all provided master keys.
-* **Session salt** is used for stronger ephemeral key derivation. If you require persistent encrypted artifacts across runs, use per-key persistent salts stored with the ciphertext.
-* **Encrypted personas/inactive storage**: The simulator supports encrypting `personas.json` and `inactive.json` on write and decrypting on load — enable this to protect persona metadata at rest.
-* **Never commit** `.env`, `key.txt`, or any file containing real private keys to version control.
-* Consider using HashiCorp Vault, AWS Secrets Manager, or similar for production secrets.
+* **MASTER_KEY** encrypts private keys and is required on startup.
+* **BACKUP_KEYS** allow decryption of old encrypted blobs after rotation.
+* **Session salt** strengthens ephemeral key derivation; store salts for persistence.
+* **Encrypted personas/inactive storage**: optionally encrypt on write/load.
+* **Never commit** `.env`, `key.txt`, or any private key files.
+* Use secret managers like HashiCorp Vault or AWS Secrets Manager in production.
 
 ---
 
 ## 🕵️ Device Agent & Fake Latency
 
-* Each persona can include a `deviceAgent` object containing a `userAgent` string and a `latency` value (ms). The simulator uses `userAgent` when making HTTP/RPC calls where custom headers are supported and applies `latency` as a simulated network delay before/after RPC calls to diversify network footprints.
-* Device agents are persisted in personas (and can be encrypted on disk) so wallets keep consistent fingerprinting unless rotated deliberately.
+* Per-wallet `deviceAgent` settings allow unique `User-Agent` strings and simulated latency to diversify network behavior.
+* Device agents are persisted in personas unless rotated manually.
 
 ---
 
 ## ⚙️ Adaptive Activity Patterns
 
-* The simulator keeps simple success/failure counters per persona (`txSuccessCount`, `txFailCount`) and uses those to **adjust `idleBias` dynamically**.
-* If a wallet experiences repeated failures, `idleBias` increases to reduce activity (saving gas and avoiding repeated failures). When success rate improves, `idleBias` lowers to resume normal activity.
+* Success/failure counters (`txSuccessCount`, `txFailCount`) dynamically adjust `idleBias`.
+* Repeated failures increase `idleBias` and reduce activity; success lowers it to normal levels.
 
 ---
 
 ## 📈 Logging & Observability
 
-* Transaction logs are buffered and flushed to daily CSV files every 5 minutes (configurable).
-* Consider integrating metrics or a dashboard (Prometheus / Grafana) for real-time monitoring and alerts (RPC failures, wallet depletion, repeated tx failures).
+* Logs buffered and flushed every 5 minutes.
+* Old logs auto-deleted after 3 days; `--clear-logs` flag purges logs.
+* Consider metrics dashboards (Prometheus / Grafana) for real-time monitoring.
 
 ---
 
-## 🛠️ Extensibility & Next Steps
+## 🛠️ Extensibility
 
-Suggested improvements:
-
-* Encrypted persona & inactive storage (implemented/optional)
-* Persistent per-key salts for long-term encrypted artifacts
-* Dashboard & metrics for live monitoring
-* Stable proxy-per-wallet assignment to simulate consistent geolocation
+* Encrypted persona/inactive storage
+* Persistent per-key salts
+* Dashboard for metrics
+* Stable proxy-per-wallet assignment for location simulation
 
 ---
 
 ## 🤝 Contributing
 
-Contributions welcome. Fork → branch → PR. Include tests and documentation for runtime changes.
+Fork → branch → PR. Include tests and documentation.
 
 ---
 
 ## ⚠️ Disclaimer
 
-This tool is for research, testing, and education. Do **not** use it for spam, Sybil attacks, or behavior that violates network terms. Use testnets wherever possible.
+For research, testing, and education only. Avoid spam/Sybil attacks. Use testnets where possible.
 
 ---
 
