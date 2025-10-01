@@ -160,7 +160,7 @@ Fork → branch → PR. Include tests and documentation.
 
 Your contributions help keep this project alive, ad-free, and continuously improving. Consider supporting our development efforts by donating.
 
-**Celo Donation Address:**
+** Donation Address:**
 `0x1C46ccEA4D62d3eEC4DCE3501aa96d0Ff5FcA954`
 
 ---
