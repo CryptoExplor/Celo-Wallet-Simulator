@@ -1,4 +1,3 @@
-
 # ⚡ Celo Wallet Simulator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -154,6 +153,15 @@ A lightweight **wallet activity simulator** for the **Celo blockchain**, designe
 ## 🤝 Contributing
 
 Fork → branch → PR. Include tests and documentation.
+
+---
+
+## 💝 We Grow Together!
+
+Your contributions help keep this project alive, ad-free, and continuously improving. Consider supporting our development efforts by donating.
+
+**Celo Donation Address:**
+`0x1C46ccEA4D62d3eEC4DCE3501aa96d0Ff5FcA954`
 
 ---
 
