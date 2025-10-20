@@ -82,7 +82,13 @@ if (!MASTER_KEY) {
 const ALL_MASTER_KEYS = [MASTER_KEY, ...BACKUP_KEYS];
 
 // --- Session Salt for Stronger Key Derivation ---
-const sessionSalt = crypto.randomBytes(16);
+let sessionSalt = crypto.randomBytes(16);
+
+// Rotate session salt hourly
+setInterval(() => {
+    sessionSalt = crypto.randomBytes(16);
+    console.log(chalk.cyan("🔑 Rotated session salt for key derivation"));
+}, 60 * 60 * 1000);
 
 /**
  * Derives a cryptographic key from a master key and a session salt.
@@ -601,15 +607,19 @@ async function sendTx(wallet, provider, profile, url) {
 
         // Determine recipient address
         let toAddress = wallet.address;
+        let pingType = "self";
         if (action === "ping") {
             const rand = Math.random();
             if (rand < 0.5) {
                 toAddress = wallet.address; // self
+                pingType = "self";
             } else if (rand < 0.7) {
                 toAddress = "0x0000000000000000000000000000000000000000"; // dead address
+                pingType = "dead";
             } else {
                 const randomWallet = ethers.Wallet.createRandom();
                 toAddress = randomWallet.address; // random generated
+                pingType = "random";
             }
         }
 
@@ -661,6 +671,7 @@ async function sendTx(wallet, provider, profile, url) {
         }
 
         // === Buffer to CSV (daily rotation) ===
+        const detailedAction = action === "ping" ? `${action}_${pingType}` : action;
         const line = [
             new Date().toISOString(),
             wallet.address,
@@ -670,7 +681,7 @@ async function sendTx(wallet, provider, profile, url) {
             gasPriceGwei,
             feeCELO,
             status,
-            action
+            detailedAction
         ].join(",");
         bufferTxLog(line);
 
