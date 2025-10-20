@@ -599,8 +599,22 @@ async function sendTx(wallet, provider, profile, url) {
             value = ethers.parseEther(amount.toFixed(6));
         }
 
+        // Determine recipient address
+        let toAddress = wallet.address;
+        if (action === "ping") {
+            const rand = Math.random();
+            if (rand < 0.5) {
+                toAddress = wallet.address; // self
+            } else if (rand < 0.7) {
+                toAddress = "0x0000000000000000000000000000000000000000"; // dead address
+            } else {
+                const randomWallet = ethers.Wallet.createRandom();
+                toAddress = randomWallet.address; // random generated
+            }
+        }
+
         const tx = await wallet.sendTransaction({
-            to: wallet.address,
+            to: toAddress,
             value: value,
             gasLimit: GAS_LIMIT
         });
