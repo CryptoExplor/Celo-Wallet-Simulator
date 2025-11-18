@@ -10,6 +10,12 @@ import crypto from "crypto";
 
 dotenv.config();
 
+// Validate required environment variables
+if (!process.env.PRIVATE_KEYS) {
+    console.error(chalk.bgRed.white.bold("❌ PRIVATE_KEYS environment variable is not set!"));
+    process.exit(1);
+}
+
 // Define __dirname equivalent for ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -158,12 +164,21 @@ function decryptWithAnyKey(encrypted) {
 // === CONFIG ===
 // List of public RPCs for Celo.
 const RPCS = [
-    "https://celo-mainnet.infura.io/v3/f0c6b3797dd54dc2aa91cd4a463bcc57",
     "https://rpc.ankr.com/celo",
     "https://celo.drpc.org",
     "https://forno.celo.org",
     "https://1rpc.io/celo"
 ];
+
+// Gas tracking RPCs (for gas price monitoring)
+const GAS_RPC_URLS = [
+    "https://forno.celo.org"
+];
+
+// Gas tolerance threshold (in Gwei) - transactions will only be sent if gas is below this value
+// Set this in your .env file as GAS_TOLERANCE_THRESHOLD=30 for 30 Gwei threshold
+const GAS_TOLERANCE_THRESHOLD = process.env.GAS_TOLERANCE_THRESHOLD ? 
+    parseFloat(process.env.GAS_TOLERANCE_THRESHOLD) : 51; // Default: 50 Gwei
 const GAS_LIMIT = 21000;
 const keysFile = "key.txt";
 let lastKey = null;
@@ -278,8 +293,8 @@ async function savePersonas() {
     try {
         const now = Date.now();
         if (now - lastPersonaSave < PERSONA_SAVE_DEBOUNCE_MS) {
-            setTimeout(() => {
-                try { fs.writeFile(personaFile, JSON.stringify(walletProfiles, null, 2)); lastPersonaSave = Date.now(); }
+            setTimeout(async () => {
+                try { await fs.writeFile(personaFile, JSON.stringify(walletProfiles, null, 2)); lastPersonaSave = Date.now(); }
                 catch (e) { console.error("failed saving personas:", e.message); }
             }, PERSONA_SAVE_DEBOUNCE_MS);
             return;
@@ -403,6 +418,21 @@ async function flushTxLog() {
 // Periodic flusher
 setInterval(flushTxLog, FLUSH_INTERVAL);
 
+// Periodic gas price monitoring (every 5 minutes)
+setInterval(async () => {
+    try {
+        const gasData = await getAverageGasPrice(false); // Less verbose periodic monitoring
+        if (gasData) {
+            const { avgGasPriceGwei } = gasData;
+            if (!isGasPriceAcceptable(avgGasPriceGwei)) {
+                console.log(chalk.yellow(`⛽ High gas prices detected: ${avgGasPriceGwei.toFixed(2)} Gwei (threshold: ${GAS_TOLERANCE_THRESHOLD} Gwei)`));
+            }
+        }
+    } catch (err) {
+        // Silently ignore gas monitoring errors
+    }
+}, 5 * 60 * 1000); // 5 minutes
+
 // --- Pick random key (with small chance of reusing last key) ---
 // Now decrypts the key before use
 function pickRandomKey() {
@@ -491,6 +521,133 @@ function getProvider(rpcUrl, agent, userAgent) {
 }
 
 /**
+ * Fetches current gas price from a specific RPC endpoint
+ * @param {string} rpcUrl - The RPC endpoint URL
+ * @returns {Promise<bigint|null>} The gas price in wei, or null if failed
+ */
+async function getGasPriceFromRpc(rpcUrl) {
+    try {
+        const provider = getProvider(rpcUrl, null, null);
+        const feeData = await provider.getFeeData();
+        
+        // Prioritize EIP-1559 maxFeePerGas, fallback to legacy gasPrice
+        return feeData.maxFeePerGas || feeData.gasPrice || null;
+    } catch (err) {
+        // Silently ignore gas price fetching errors to reduce verbosity
+        return null;
+    }
+}
+
+/**
+ * Gets average gas price from multiple RPCs
+ * @returns {Promise<{avgGasPriceGwei: number, gasPricesGwei: number[]}|null>} Average gas price and individual prices
+ */
+async function getAverageGasPrice(verbose = true) {
+    if (verbose) {
+        console.log(chalk.cyan("🔍 Checking gas prices from multiple RPCs..."));
+    }
+    
+    // Fetch gas prices from all RPCs concurrently
+    const gasPricePromises = GAS_RPC_URLS.map(url => getGasPriceFromRpc(url));
+    const gasPrices = await Promise.all(gasPricePromises);
+    
+    // Filter out null values
+    const validGasPrices = gasPrices.filter(price => price !== null);
+    
+    if (validGasPrices.length === 0) {
+        console.error(chalk.red("❌ Failed to get gas prices from any RPC"));
+        return null;
+    }
+    
+    // Convert to Gwei for easier comparison
+    const gasPricesGwei = validGasPrices.map(price => 
+        parseFloat(ethers.formatUnits(price, "gwei"))
+    );
+    
+    // Calculate average
+    const sum = gasPricesGwei.reduce((acc, price) => acc + price, 0);
+    const avgGasPriceGwei = sum / gasPricesGwei.length;
+    
+    if (verbose) {
+        console.log(chalk.cyan(`📊 Gas prices: ${gasPricesGwei.map(p => p.toFixed(2)).join(", ")} Gwei (avg: ${avgGasPriceGwei.toFixed(2)} Gwei)`));
+    }
+    
+    return {
+        avgGasPriceGwei,
+        gasPricesGwei
+    };
+}
+
+/**
+ * Checks if current gas price is below tolerance threshold
+ * @param {number} avgGasPriceGwei - Average gas price in Gwei
+ * @returns {boolean} True if gas price is acceptable
+ */
+function isGasPriceAcceptable(avgGasPriceGwei) {
+    const isAcceptable = avgGasPriceGwei <= GAS_TOLERANCE_THRESHOLD;
+    if (!isAcceptable) {
+        console.log(chalk.yellow(`⛽ Gas price ${avgGasPriceGwei.toFixed(2)} Gwei exceeds threshold of ${GAS_TOLERANCE_THRESHOLD} Gwei`));
+    }
+    return isAcceptable;
+}
+
+/**
+ * Simulates micro-behaviors of real user devices during transaction processing
+ * @returns {Promise<void>}
+ */
+async function simulateMicroBehaviors() {
+    // 80-180ms signing delay
+    const signingDelay = 80 + Math.floor(Math.random() * 101);
+    await new Promise(resolve => setTimeout(resolve, signingDelay));
+    
+    // 20-90ms network preparation delay
+    const networkDelay = 20 + Math.floor(Math.random() * 71);
+    await new Promise(resolve => setTimeout(resolve, networkDelay));
+    
+    // 40-200ms hesitation before broadcasting
+    const broadcastDelay = 40 + Math.floor(Math.random() * 161);
+    await new Promise(resolve => setTimeout(resolve, broadcastDelay));
+}
+
+/**
+ * Implements random hesitation when gas prices spike (simulating human behavior)
+ * @param {number} avgGasPriceGwei - Average gas price in Gwei
+ * @param {number[]} gasPricesGwei - Individual gas prices from different RPCs
+ * @returns {Promise<boolean>} True if should proceed with transaction
+ */
+async function shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei) {
+    // Calculate standard deviation to detect price volatility
+    const variance = gasPricesGwei.reduce((acc, price) => acc + Math.pow(price - avgGasPriceGwei, 2), 0) / gasPricesGwei.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // If there's high volatility or gas price is above 80% of threshold, consider hesitating
+    const volatilityThreshold = GAS_TOLERANCE_THRESHOLD * 0.8;
+    const isVolatile = stdDev > 5 || avgGasPriceGwei > volatilityThreshold;
+    
+    if (isVolatile) {
+        console.log(chalk.yellow("⚠️  Gas price volatility detected, simulating human hesitation..."));
+        
+        // Random hesitation time between 3-10 seconds
+        const hesitationTime = 3 + Math.floor(Math.random() * 7);
+        console.log(chalk.yellow(`⏳ Hesitating for ${hesitationTime} seconds...`));
+        
+        await new Promise(resolve => setTimeout(resolve, hesitationTime * 1000));
+        
+        // After hesitation, check gas prices again (less verbose)
+        const updatedGasData = await getAverageGasPrice(false);
+        if (updatedGasData && isGasPriceAcceptable(updatedGasData.avgGasPriceGwei)) {
+            console.log(chalk.green("✅ Gas prices improved after hesitation"));
+            return true;
+        } else {
+            console.log(chalk.red("❌ Gas prices still high after hesitation"));
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+/**
  * Attempts to connect to an RPC endpoint.
  * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string}|null>} The working provider and its URL, or null if all fail.
  */
@@ -507,10 +664,10 @@ async function tryProviders(profile) {
                 provider.getNetwork(),
                 new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
             ]);
-            console.log(chalk.hex("#00FF7F").bold(`✅ Connected: ${url}, Chain ID: ${network.chainId}`));
+            // Only log successful connections to reduce verbosity
             return { provider, url };
         } catch (e) {
-            console.warn(chalk.hex("#FF5555").bold(`❌ Failed to connect to ${url}: ${e.message}`));
+            // Silently ignore failed connections to reduce verbosity
         }
     }
     return null;
@@ -594,6 +751,39 @@ async function sendTx(wallet, provider, profile, url) {
             return;
         }
 
+        // === NEW: Dynamic Gas Pricing Check ===
+        // Check gas prices before transaction (less verbose)
+        const gasData = await getAverageGasPrice(true); // Verbose for initial check
+        
+        if (!gasData) {
+            console.error(chalk.red("❌ Failed to get gas price data, skipping transaction"));
+            return;
+        }
+        
+        const { avgGasPriceGwei, gasPricesGwei } = gasData;
+        
+        // Check if gas price is within tolerance
+        if (!isGasPriceAcceptable(avgGasPriceGwei)) {
+            console.log(chalk.yellow(`⛽ Gas price ${avgGasPriceGwei.toFixed(2)} Gwei exceeds threshold, skipping transaction`));
+            return;
+        }
+        
+        // Check for gas price spikes and implement human-like hesitation
+        const shouldProceed = await shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei);
+        if (!shouldProceed) {
+            console.log(chalk.yellow("⏳ Skipping transaction due to gas price conditions"));
+            return;
+        }
+        
+        // Get updated gas data after any hesitation (less verbose)
+        const finalGasData = await getAverageGasPrice(false);
+        if (!finalGasData || !isGasPriceAcceptable(finalGasData.avgGasPriceGwei)) {
+            console.log(chalk.yellow(`⛽ Gas price ${finalGasData?.avgGasPriceGwei?.toFixed(2) || 'N/A'} Gwei above threshold after hesitation, skipping transaction`));
+            return;
+        }
+        
+        console.log(chalk.green(`✅ Gas price ${finalGasData.avgGasPriceGwei.toFixed(2)} Gwei is acceptable, proceeding with transaction`));
+
         // === Decide action: normal send vs ping ===
         let action = "normal";
         let value;
@@ -623,6 +813,10 @@ async function sendTx(wallet, provider, profile, url) {
             }
         }
 
+        // Simulate micro-behaviors before sending transaction
+        console.log(chalk.gray("📱 Simulating device micro-behaviors before transaction..."));
+        await simulateMicroBehaviors();
+        
         const tx = await wallet.sendTransaction({
             to: toAddress,
             value: value,
@@ -657,10 +851,10 @@ async function sendTx(wallet, provider, profile, url) {
                 feeCELO = ethers.formatEther(gasPriceUsed * (receipt?.gasUsed ?? 0n));
 
                 console.log(chalk.bgGreen.white.bold("🟢 Confirmed!"));
-                console.log(`   Nonce: ${txNonce}`);
-                console.log(chalk.hex("#ADFF2F").bold(`   Gas Used: ${gasUsed}`));
-                console.log(chalk.hex("#FFB6C1").bold(`   Gas Price: ${gasPriceGwei} gwei`));
-                console.log(chalk.hex("#FFD700").bold(`   Fee Paid: ${feeCELO} CELO`));
+                console.log(`Nonce: ${txNonce}`);
+                console.log(chalk.hex("#ADFF2F").bold(`Gas Used: ${gasUsed}`));
+                console.log(chalk.hex("#FFB6C1").bold(`Gas Price: ${gasPriceGwei} gwei`));
+                console.log(chalk.hex("#FFD700").bold(`Fee Paid: ${feeCELO} CELO`));
             } else {
                 console.warn(chalk.bgYellow.white.bold("🟡 No confirmation in 30s, moving on..."));
                 status = "timeout";
@@ -770,7 +964,7 @@ async function main() {
             const logFiles = files.filter(file => /^tx_log_\d{4}-\d{2}-\d{2}\.csv$/.test(file));
             for (const file of logFiles) {
                 await fs.unlink(path.join(__dirname, file));
-                console.log(chalk.gray(`   - Deleted ${file}`));
+                console.log(chalk.gray(`- Deleted ${file}`));
             }
             console.log(chalk.green('✅ Old logs cleared successfully.'));
         } catch (err) {
