@@ -69,7 +69,7 @@ process.on("unhandledRejection", (reason, promise) => {
     console.error(chalk.bgRed.white.bold("[Unhandled Rejection]"), reason);
 });
 
-// === NEW: In-Memory Encryption Helper Functions ===
+// === FIXED: In-Memory Encryption Helper Functions ===
 const ALGO = "aes-256-gcm";
 const IV_LENGTH = 12;
 
@@ -87,40 +87,34 @@ if (!MASTER_KEY) {
 
 const ALL_MASTER_KEYS = [MASTER_KEY, ...BACKUP_KEYS];
 
-// --- Session Salt for Stronger Key Derivation ---
-let sessionSalt = crypto.randomBytes(16);
-
-// Rotate session salt hourly
-setInterval(() => {
-    sessionSalt = crypto.randomBytes(16);
-    console.log(chalk.cyan("🔑 Rotated session salt for key derivation"));
-}, 60 * 60 * 1000);
-
 /**
- * Derives a cryptographic key from a master key and a session salt.
+ * Derives a cryptographic key from a master key and a salt.
  * @param {string} masterKey - The master key for key derivation.
+ * @param {Buffer} salt - The salt for key derivation.
  * @returns {Buffer} The derived key as a Buffer.
  */
-function deriveKey(masterKey) {
-    return crypto.scryptSync(masterKey, sessionSalt, 32);
+function deriveKey(masterKey, salt) {
+    return crypto.scryptSync(masterKey, salt, 32);
 }
 
 /**
  * Encrypts a private key using a master key.
  * @param {string} privateKey - The private key to encrypt.
  * @param {string} masterKey - The master key for encryption.
- * @returns {string} The encrypted key string in the format "iv:authTag:encrypted".
+ * @returns {string} The encrypted key string in the format "salt:iv:authTag:encrypted".
  */
 function encryptPrivateKey(privateKey, masterKey) {
+    const salt = crypto.randomBytes(16);  // Generate unique salt for this encryption
     const iv = crypto.randomBytes(IV_LENGTH);
-    const derivedKey = deriveKey(masterKey);
+    const derivedKey = deriveKey(masterKey, salt);
     const cipher = crypto.createCipheriv(ALGO, derivedKey, iv);
 
     let encrypted = cipher.update(privateKey, "utf8", "hex");
     encrypted += cipher.final("hex");
 
     const authTag = cipher.getAuthTag().toString("hex");
-    return `${iv.toString("hex")}:${authTag}:${encrypted}`;
+    // IMPORTANT: Store salt with the encrypted data
+    return `${salt.toString("hex")}:${iv.toString("hex")}:${authTag}:${encrypted}`;
 }
 
 /**
@@ -130,10 +124,11 @@ function encryptPrivateKey(privateKey, masterKey) {
  * @returns {string} The decrypted private key.
  */
 function decryptPrivateKey(encrypted, masterKey) {
-    const [ivHex, authTagHex, data] = encrypted.split(":");
+    const [saltHex, ivHex, authTagHex, data] = encrypted.split(":");
+    const salt = Buffer.from(saltHex, "hex");  // Extract salt from encrypted data
     const iv = Buffer.from(ivHex, "hex");
     const authTag = Buffer.from(authTagHex, "hex");
-    const derivedKey = deriveKey(masterKey);
+    const derivedKey = deriveKey(masterKey, salt);  // Use the original salt
     const decipher = crypto.createDecipheriv(ALGO, derivedKey, iv);
     decipher.setAuthTag(authTag);
 
@@ -233,12 +228,12 @@ async function loadKeysInline() {
         process.exit(1);
     }
 
-    // Encrypt keys and store them
+    // Encrypt keys and store them (each with its own salt)
     ENCRYPTED_KEYS = validKeys.map(k => encryptPrivateKey(k, MASTER_KEY));
     // Create ALL_WALLETS list using decrypted keys just once at startup
     ALL_WALLETS = validKeys.map(k => new ethers.Wallet(k).address);
 
-    console.log(chalk.cyan(`🔐 Loaded ${ALL_WALLETS.length} wallets (encrypted in memory)`));
+    console.log(chalk.cyan(`🔐 Loaded ${ALL_WALLETS.length} wallets (encrypted in memory with individual salts)`));
 }
 
 // === NEW: Device Agent Generation ===
@@ -434,7 +429,8 @@ setInterval(async () => {
 }, 5 * 60 * 1000); // 5 minutes
 
 // --- Pick random key (with small chance of reusing last key) ---
-// Now decrypts the key before use
+// Now pickRandomKey() will work correctly because each encrypted key
+// includes its own salt for decryption
 function pickRandomKey() {
     const idx = Math.floor(Math.random() * ENCRYPTED_KEYS.length);
     const encrypted = ENCRYPTED_KEYS[idx];
@@ -525,9 +521,10 @@ function getProvider(rpcUrl, agent, userAgent) {
  * @param {string} rpcUrl - The RPC endpoint URL
  * @returns {Promise<bigint|null>} The gas price in wei, or null if failed
  */
-async function getGasPriceFromRpc(rpcUrl) {
+async function getGasPriceFromRpc(rpcUrl, proxyUrl = null, userAgent = null) {
     try {
-        const provider = getProvider(rpcUrl, null, null);
+        const agent = proxyUrl ? createAgent(proxyUrl) : null;
+        const provider = getProvider(rpcUrl, agent, userAgent);
         const feeData = await provider.getFeeData();
         
         // Prioritize EIP-1559 maxFeePerGas, fallback to legacy gasPrice
@@ -542,13 +539,13 @@ async function getGasPriceFromRpc(rpcUrl) {
  * Gets average gas price from multiple RPCs
  * @returns {Promise<{avgGasPriceGwei: number, gasPricesGwei: number[]}|null>} Average gas price and individual prices
  */
-async function getAverageGasPrice(verbose = true) {
+async function getAverageGasPrice(verbose = true, proxyUrl = null, userAgent = null) {
     if (verbose) {
         console.log(chalk.cyan("🔍 Checking gas prices from multiple RPCs..."));
     }
     
     // Fetch gas prices from all RPCs concurrently
-    const gasPricePromises = GAS_RPC_URLS.map(url => getGasPriceFromRpc(url));
+    const gasPricePromises = GAS_RPC_URLS.map(url => getGasPriceFromRpc(url, proxyUrl, userAgent));
     const gasPrices = await Promise.all(gasPricePromises);
     
     // Filter out null values
@@ -613,9 +610,11 @@ async function simulateMicroBehaviors() {
  * Implements random hesitation when gas prices spike (simulating human behavior)
  * @param {number} avgGasPriceGwei - Average gas price in Gwei
  * @param {number[]} gasPricesGwei - Individual gas prices from different RPCs
+ * @param {string} proxyUrl - The proxy URL being used
+ * @param {string} userAgent - The user agent being used
  * @returns {Promise<boolean>} True if should proceed with transaction
  */
-async function shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei) {
+async function shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei, proxyUrl, userAgent) {
     // Calculate standard deviation to detect price volatility
     const variance = gasPricesGwei.reduce((acc, price) => acc + Math.pow(price - avgGasPriceGwei, 2), 0) / gasPricesGwei.length;
     const stdDev = Math.sqrt(variance);
@@ -634,7 +633,7 @@ async function shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei) {
         await new Promise(resolve => setTimeout(resolve, hesitationTime * 1000));
         
         // After hesitation, check gas prices again (less verbose)
-        const updatedGasData = await getAverageGasPrice(false);
+        const updatedGasData = await getAverageGasPrice(false, proxyUrl, userAgent);
         if (updatedGasData && isGasPriceAcceptable(updatedGasData.avgGasPriceGwei)) {
             console.log(chalk.green("✅ Gas prices improved after hesitation"));
             return true;
@@ -649,7 +648,7 @@ async function shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei) {
 
 /**
  * Attempts to connect to an RPC endpoint.
- * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string}|null>} The working provider and its URL, or null if all fail.
+ * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string, proxyUrl: string, userAgent: string}|null>} The working provider and its URL, or null if all fail.
  */
 async function tryProviders(profile) {
     console.log(chalk.hex("#00FFFF").bold("🔍 Searching for a working RPC endpoint..."));
@@ -665,7 +664,7 @@ async function tryProviders(profile) {
                 new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
             ]);
             // Only log successful connections to reduce verbosity
-            return { provider, url };
+            return { provider, url, proxyUrl, userAgent };
         } catch (e) {
             // Silently ignore failed connections to reduce verbosity
         }
@@ -675,7 +674,7 @@ async function tryProviders(profile) {
 
 /**
  * Iterates through the list of RPCs and returns the first one that successfully connects.
- * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string}>} The working provider and its URL.
+ * @returns {Promise<{provider: ethers.JsonRpcProvider, url: string, proxyUrl: string, userAgent: string}>} The working provider and its URL.
  */
 async function getWorkingProvider(profile) {
     return await tryProviders(profile);
@@ -716,9 +715,11 @@ function checkActive(wallet, profile) {
  * @param {ethers.JsonRpcProvider} provider - The RPC provider.
  * @param {object} profile - The wallet's persona profile.
  * @param {string} url - The URL of the RPC being used.
+ * @param {string} proxyUrl - The proxy URL being used.
+ * @param {string} userAgent - The user agent being used.
  * @throws {Error} If the transaction fails.
  */
-async function sendTx(wallet, provider, profile, url) {
+async function sendTx(wallet, provider, profile, url, proxyUrl, userAgent) {
     try {
         if (Math.random() < profile.idleBias) {
             console.log(chalk.hex("#808080").italic("\n😴 Persona idle mode, skipping this cycle..."));
@@ -753,7 +754,7 @@ async function sendTx(wallet, provider, profile, url) {
 
         // === NEW: Dynamic Gas Pricing Check ===
         // Check gas prices before transaction (less verbose)
-        const gasData = await getAverageGasPrice(true); // Verbose for initial check
+        const gasData = await getAverageGasPrice(true, proxyUrl, userAgent); // Verbose for initial check
         
         if (!gasData) {
             console.error(chalk.red("❌ Failed to get gas price data, skipping transaction"));
@@ -769,14 +770,14 @@ async function sendTx(wallet, provider, profile, url) {
         }
         
         // Check for gas price spikes and implement human-like hesitation
-        const shouldProceed = await shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei);
+        const shouldProceed = await shouldProceedWithGasSpike(avgGasPriceGwei, gasPricesGwei, proxyUrl, userAgent);
         if (!shouldProceed) {
             console.log(chalk.yellow("⏳ Skipping transaction due to gas price conditions"));
             return;
         }
         
         // Get updated gas data after any hesitation (less verbose)
-        const finalGasData = await getAverageGasPrice(false);
+        const finalGasData = await getAverageGasPrice(false, proxyUrl, userAgent);
         if (!finalGasData || !isGasPriceAcceptable(finalGasData.avgGasPriceGwei)) {
             console.log(chalk.yellow(`⛽ Gas price ${finalGasData?.avgGasPriceGwei?.toFixed(2) || 'N/A'} Gwei above threshold after hesitation, skipping transaction`));
             return;
@@ -891,10 +892,12 @@ async function sendTx(wallet, provider, profile, url) {
  * @param {ethers.JsonRpcProvider} provider - The RPC provider.
  * @param {object} profile - The wallet's persona profile.
  * @param {string} url - The URL of the RPC being used.
+ * @param {string} proxyUrl - The proxy URL being used.
+ * @param {string} userAgent - The user agent being used.
  */
-async function safeSendTx(wallet, provider, profile, url) {
+async function safeSendTx(wallet, provider, profile, url, proxyUrl, userAgent) {
     try {
-        await sendTx(wallet, provider, profile, url);
+        await sendTx(wallet, provider, profile, url, proxyUrl, userAgent);
     } catch (err) {
         console.warn(chalk.hex("#FFA500").bold("⚠️ Transaction failed. Checking persona retry bias..."));
 
@@ -909,7 +912,7 @@ async function safeSendTx(wallet, provider, profile, url) {
 
         console.warn(chalk.hex("#FFA500").bold("⚠️ Retrying after error..."));
         await randomDelay(5, 10);
-        try { await sendTx(wallet, provider, profile, url); } catch (retryErr) {
+        try { await sendTx(wallet, provider, profile, url, proxyUrl, userAgent); } catch (retryErr) {
             console.error(chalk.bgRed.white.bold("❌ Error on retry:", retryErr.message));
         }
     }
@@ -999,11 +1002,15 @@ async function main() {
         // === NEW LOGIC: Retry loop for RPC connection ===
         let provider = null;
         let url = null;
+        let proxyUrl = null;
+        let userAgent = null;
         while (!provider) {
             const providerResult = await getWorkingProvider(profile);
             if (providerResult) {
                 provider = providerResult.provider;
                 url = providerResult.url;
+                proxyUrl = providerResult.proxyUrl;
+                userAgent = providerResult.userAgent;
             } else {
                 console.warn(chalk.hex("#FF8C00").bold("🚫 All RPCs failed to connect. Retrying in 10 seconds..."));
                 await randomDelay(10, 15);
@@ -1021,7 +1028,7 @@ async function main() {
         }
 
         // Execute the transaction logic, including retries
-        await safeSendTx(wallet, provider, profile, url);
+        await safeSendTx(wallet, provider, profile, url, proxyUrl, userAgent);
 
         // Explicit memory wipe after use
         key = null;
